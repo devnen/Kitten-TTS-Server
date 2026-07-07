@@ -9,7 +9,7 @@ import shutil
 from copy import deepcopy
 from threading import Lock
 from typing import Dict, Any, Optional, List, Tuple
-import torch  # For automatic CUDA/CPU device detection
+import onnxruntime as ort  # For automatic CPU/GPU provider detection
 from pathlib import Path
 
 # Standard logger setup
@@ -36,13 +36,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "port": 8005,  # Port number for the server.
         "use_ngrok": False,  # Placeholder for ngrok integration (if used).
         "use_auth": False,  # Placeholder for basic authentication (if used).
-        "auth_username": "user",  # Default username if authentication is enabled.
-        "auth_password": "password",  # Default password if authentication is enabled.
         "log_file_path": str(
             DEFAULT_LOGS_PATH / "tts_server.log"
         ),  # Path to the server log file.
         "log_file_max_size_mb": 10,  # Maximum size of a single log file before rotation.
         "log_file_backup_count": 5,  # Number of backup log files to keep.
+        "open_browser": False,  # Open the Web UI automatically; intended for local development only.
+        "enable_performance_monitor": False,  # Enables concise per-request performance logs.
     },
     "model": {  # Updated section for model source configuration
         "repo_id": "KittenML/kitten-tts-nano-0.1",  # KittenTTS Hugging Face repository ID
@@ -170,7 +170,7 @@ class YamlConfigManager:
         string paths in the configuration data to Path objects for internal use.
         The 'config_data' dictionary is modified in place.
         """
-        # Resolve TTS device setting with robust CUDA detection.
+        # Resolve TTS device setting using ONNX Runtime provider availability.
         current_device_setting = _get_nested_value(
             config_data, ["tts_engine", "device"], "auto"
         )
@@ -205,28 +205,19 @@ class YamlConfigManager:
 
     def _detect_best_device(self) -> str:
         """
-        Robustly detects the best available device for TTS processing.
-        Tests actual CUDA functionality rather than just checking availability.
+        Detects the best available device for TTS processing using ONNX Runtime.
 
         Returns:
-            str: 'cuda' if CUDA is truly functional, 'cpu' otherwise.
+            str: 'cuda' if ONNX Runtime exposes CUDAExecutionProvider, 'cpu' otherwise.
         """
-        # Test CUDA first as it's generally preferred for ML workloads
-        if torch.cuda.is_available():
-            try:
-                # Actually test CUDA functionality by creating a tensor and moving it to CUDA
-                test_tensor = torch.tensor([1.0])
-                test_tensor = test_tensor.cuda()
-                test_tensor = test_tensor.cpu()  # Clean up
-                logger.info("CUDA test successful. Using CUDA device.")
-                return "cuda"
-            except Exception as e:
-                logger.warning(
-                    f"CUDA is reported as available but failed functionality test: {e}. "
-                    f"This usually means PyTorch was not compiled with CUDA support."
-                )
+        available_providers = ort.get_available_providers()
+        logger.info(f"Available ONNX Runtime providers: {available_providers}")
 
-        logger.info("CUDA not available or functional. Using CPU.")
+        if "CUDAExecutionProvider" in available_providers:
+            logger.info("CUDAExecutionProvider is available. Using CUDA device.")
+            return "cuda"
+
+        logger.info("CUDAExecutionProvider is not available. Using CPU.")
         return "cpu"
 
     def _prepare_config_for_saving(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -678,8 +669,32 @@ def get_host() -> str:
 
 def get_port() -> int:
     """Returns the server port number."""
-    return config_manager.get_int(
-        "server.port", _get_default_from_structure("server.port")
+    port_from_env = os.environ.get("PORT")
+    if port_from_env is not None:
+        try:
+            port = int(port_from_env)
+            logger.info("Using PORT environment variable for server port: %s", port)
+            return port
+        except (ValueError, TypeError):
+            logger.warning(
+                "Invalid PORT environment variable value '%s'. Using config fallback.",
+                port_from_env,
+            )
+
+    default_port = _get_default_from_structure("server.port")
+    port = config_manager.get_int("server.port", default_port)
+    logger.info("Using config fallback for server port: %s", port)
+    return port
+
+
+def get_open_browser() -> bool:
+    """Returns whether the server should open the Web UI in a browser on startup."""
+    env_value = os.getenv("OPEN_BROWSER")
+    if env_value is not None:
+        return env_value.strip().lower() in ("true", "1", "t", "yes", "y")
+
+    return config_manager.get_bool(
+        "server.open_browser", _get_default_from_structure("server.open_browser")
     )
 
 

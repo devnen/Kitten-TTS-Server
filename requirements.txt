@@ -27,5 +27,3 @@ hf-transfer
 pydub
 librosa
 praat-parselmouth
-torch
-torchaudio

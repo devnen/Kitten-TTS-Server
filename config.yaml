@@ -3,11 +3,10 @@ server:
   port: 8005
   use_ngrok: false
   use_auth: false
-  auth_username: user
-  auth_password: password
-  log_file_path: logs\tts_server.log
+  log_file_path: logs/tts_server.log
   log_file_max_size_mb: 10
   log_file_backup_count: 5
+  open_browser: false
 model:
   repo_id: kitten-nano-0.8-fp32
 tts_engine:
@@ -23,15 +22,7 @@ audio_output:
   format: wav
   sample_rate: 24000
 ui_state:
-  last_text: "Actually, the real problem might be simpler: after a model switch, fetchInitialData\
-    \ is called again (line in\n  applyModelChange: await fetchInitialData()). This\
-    \ calls initializeApplication() -> populateVoices(). The\n  populateVoices function\
-    \ resets voice to currentUiState.last_voice which is \"Jasper\" (saved from the\
-    \ previous\n  generation). Then attachStateSavingListeners runs again via setTimeout.\
-    \ But since listenersAttached is already\n  true from the first load, the code\
-    \ at line 475-477 does attachStateSavingListeners() again, adding duplicate\n\
-    \  listeners! Actually no, it sets listenersAttached = true but the listeners\
-    \ are added via addEventListener which\n  doesn't remove old ones."
+  last_text: ""
   last_voice: Bruno
   last_chunk_size: 200
   last_split_text_enabled: true

@@ -4,7 +4,7 @@ services:
   kitten-tts-server:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
       args:
         # This build argument ensures only CPU dependencies are installed
         - RUNTIME=cpu
@@ -18,7 +18,7 @@ services:
       - ./logs:/app/logs
       # Named volume for Hugging Face model cache to persist across container rebuilds
       - hf_cache:/app/hf_cache
-    
+
     restart: unless-stopped
     environment:
       # Enable faster Hugging Face downloads inside the container

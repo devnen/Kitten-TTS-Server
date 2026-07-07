@@ -53,6 +53,16 @@ class CustomTTSRequest(BaseModel):
         None, description="Overrides default language if provided."
     )
 
+    stream: Optional[bool] = Field(
+        False,
+        description=(
+            "When true, stream each synthesized text chunk immediately after encoding. "
+            "Compatibility mode (false) buffers and merges all chunks into one downloadable file. "
+            "For WAV streaming, each yielded chunk is a standalone WAV file with its own header; "
+            "clients expecting one continuous WAV file may only play the first chunk or reject the stream."
+        ),
+    )
+
 
 class ErrorResponse(BaseModel):
     """Standard error response model for API errors."""

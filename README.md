@@ -292,7 +292,7 @@ The first time you start the server, it will automatically download the default 
     python server.py
     ```
 
-3.  The server will start and automatically open the Web UI in your default browser.
+3.  Open the Web UI in your browser. Browser auto-open is disabled by default so hosted or containerized deployments do not launch a browser. For local UI development, set `OPEN_BROWSER=true` or `server.open_browser: true`.
     *   **Web UI:** `http://localhost:8005`
     *   **API Docs:** `http://localhost:8005/docs`
 
@@ -480,6 +480,10 @@ Use this for drop-in compatibility with scripts expecting OpenAI's TTS API struc
       "speed": 0.9
     }
     ```
+*   **Latency check:** WAV responses for medium/long text stream sentence chunks as they are generated. MP3 and Opus may still use a buffered compatibility path.
+    ```bash
+    curl -s -o /tmp/out.wav -w "TTFB=%{time_starttransfer}s TOTAL=%{time_total}s STATUS=%{http_code}\n" -X POST "$BASE_URL/v1/audio/speech" -H "Content-Type: application/json" -d '{"model":"kitten-tts-nano-0.1","input":"Welcome to Pathwisse","voice":"expr-voice-2-f","response_format":"wav"}'
+    ```
 
 ### Model Management Endpoints
 
@@ -529,3 +533,27 @@ This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) f
 ## 🤝 Contributing
 
 Contributions, issues, and feature requests are welcome! Please feel free to open an issue or submit a pull request.
+
+
+### API Authentication and Security Defaults
+For safe deployment, the following security defaults are enabled:
+- `ENABLE_WEB_UI` is `false` by default.
+- `ENABLE_MANAGEMENT_ENDPOINTS` is `false` by default.
+- API endpoints (`/tts`, `/api/tts/speak`, `/v1/audio/speech`, `/api/unload`, etc) require a configured `TTS_API_KEY`. If it is unset, these endpoints fail securely.
+
+Provide your configured key via `Authorization: Bearer <your_api_key>` or `X-API-Key: <your_api_key>`.
+Only `/health` and `/api/tts/health` are public without auth.
+
+### CORS Configuration
+CORS origins should be specified via the `ALLOWED_ORIGINS` environment variable (comma-separated, e.g. `http://localhost:3000,http://localhost:5173`). Wildcard `*` origins are no longer permitted with credentials in production.
+
+### MP3 Support
+To ensure compatibility in lightweight server environments (like Railway), MP3 generation is **intentionally unsupported** in this deployment. Please request `wav` (default) or `opus`.
+
+The `/tts` and `/api/tts/speak` endpoints, as well as the OpenAI compatible endpoint `/v1/audio/speech`, now require authentication via an API Key when `TTS_API_KEY` environment variable is set.
+Provide the key in the `Authorization` header:
+`Authorization: Bearer <your_api_key>`
+
+### Dependency Footprint Note (PR #16)
+The CPU image size is significantly large (~2.5GB+) because `misaki[en]>=0.9.4` automatically pulls `spacy-curated-transformers` and `torch`. This violates the lightweight footprint requirement for small Railway instances.
+*Recommendation for future:* Suggest moving to a lighter G2P/phonemizer pipeline, such as `gruut` or `phonemizer` with standard `espeak-ng` directly without transformer models to keep the image size small.

@@ -14,9 +14,14 @@ import yaml  # For loading presets
 import numpy as np
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Iterator
 import webbrowser  # For automatic browser opening
 import threading  # For automatic browser opening
+
+
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from fastapi import Depends, Security, Header
+import hmac
 
 from fastapi import (
     FastAPI,
@@ -42,6 +47,7 @@ from config import (
     config_manager,
     get_host,
     get_port,
+    get_open_browser,
     get_log_file_path,
     get_output_path,
     get_ui_title,
@@ -65,9 +71,9 @@ from pydantic import BaseModel, Field
 
 class OpenAISpeechRequest(BaseModel):
     model: str
-    input_: str = Field(..., alias="input")
+    input_: str = Field(..., alias="input", min_length=1)
     voice: str
-    response_format: Literal["wav", "opus", "mp3"] = "wav"  # Add "mp3"
+    response_format: Literal["wav", "opus", "mp3"] = "wav"
     speed: float = 1.0
     seed: Optional[int] = None
 
@@ -97,8 +103,24 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("watchfiles").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+
+def _is_performance_monitor_enabled() -> bool:
+    """Return whether concise request performance logging is enabled."""
+    env_value = os.getenv("ENABLE_PERFORMANCE_MONITOR")
+    if env_value is not None:
+        return env_value.strip().lower() in ("true", "1", "t", "yes", "y")
+    return config_manager.get_bool("server.enable_performance_monitor", False)
+
+
+def _format_duration_ms(start_time: float, end_time: Optional[float] = None) -> str:
+    """Format an elapsed duration in milliseconds for compact logs."""
+    end = time.perf_counter() if end_time is None else end_time
+    return f"{(end - start_time) * 1000:.1f}ms"
+
 # --- Global Variables & Application Setup ---
 startup_complete_event = threading.Event()  # For coordinating browser opening
+app_start_time = time.monotonic()
+
 
 
 def _delayed_browser_open(host: str, port: int):
@@ -146,13 +168,20 @@ async def lifespan(app: FastAPI):
             )
         else:
             logger.info("TTS Model loaded successfully via engine.")
-            host_address = get_host()
-            server_port = get_port()
-            browser_thread = threading.Thread(
-                target=lambda: _delayed_browser_open(host_address, server_port),
-                daemon=True,
-            )
-            browser_thread.start()
+            engine.warmup(text="Hello")
+            if get_open_browser():
+                host_address = get_host()
+                server_port = get_port()
+                browser_thread = threading.Thread(
+                    target=lambda: _delayed_browser_open(host_address, server_port),
+                    daemon=True,
+                )
+                browser_thread.start()
+            else:
+                logger.info(
+                    "Browser auto-open is disabled. Set server.open_browser=true "
+                    "or OPEN_BROWSER=true to enable it for local UI development."
+                )
 
         logger.info("Application startup sequence complete.")
         startup_complete_event.set()
@@ -168,6 +197,41 @@ async def lifespan(app: FastAPI):
         logger.info("TTS Server: Application shutdown complete.")
 
 
+
+security = HTTPBearer(auto_error=False)
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str = Security(api_key_header)
+):
+    api_key = os.environ.get("TTS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="TTS_API_KEY is not configured on the server. Access denied.")
+
+    token = x_api_key
+    if not token and credentials and credentials.credentials:
+        token = credentials.credentials
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing API Key")
+
+    if not hmac.compare_digest(token, api_key):
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    return token
+
+def verify_management_access(api_key = Depends(verify_api_key)):
+    # Block if ENABLE_MANAGEMENT_ENDPOINTS is false
+    if os.environ.get("ENABLE_MANAGEMENT_ENDPOINTS", "false").lower() == "false":
+        raise HTTPException(status_code=403, detail="Management endpoints are disabled")
+    return api_key
+
+def verify_ui_access():
+    if os.environ.get("ENABLE_WEB_UI", "false").lower() == "false":
+        raise HTTPException(status_code=403, detail="Web UI is disabled")
+
 # --- FastAPI Application Instance ---
 app = FastAPI(
     title=get_ui_title(),
@@ -177,10 +241,16 @@ app = FastAPI(
 )
 
 # --- CORS Middleware ---
+allowed_origins_str = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173,http://localhost:8000")
+allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+
+# If no origins are configured or it's a wildcard, we must disable credentials
+allow_credentials = "*" not in allowed_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*", "null"],
-    allow_credentials=True,
+    allow_origins=allowed_origins if allowed_origins else ["http://localhost:8000"],
+    allow_credentials=allow_credentials,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -239,9 +309,60 @@ except RuntimeError as e_mount_outputs:
 # --- API Endpoints ---
 
 
+@app.get("/health", tags=["Health"])
+@app.get("/api/tts/health", tags=["Health"])
+async def health_check():
+    """Reports process, model, ONNX provider, and readiness health."""
+    model_loaded = bool(engine.MODEL_LOADED)
+    loading = engine.is_loading()
+    download_status = engine.get_download_status()
+    load_error = download_status.get("error")
+    warmup_completed = startup_complete_event.is_set() and model_loaded
+    warmup_failed = (
+        startup_complete_event.is_set()
+        and not model_loaded
+        and not loading
+    )
+    provider_info = engine.get_onnx_provider_info()
+    model_info = engine.get_model_info()
+    configured_selector = engine.resolve_selector(
+        config_manager.get_string("model.repo_id", "KittenML/kitten-tts-nano-0.1")
+    )
+    model_repo_id = (
+        model_info.get("repo_id")
+        or engine.MODEL_REGISTRY[configured_selector]["repo_id"]
+    )
+
+    if model_loaded:
+        status = "ok"
+        status_code = 200
+    elif loading:
+        status = "model_loading"
+        status_code = 503
+    elif load_error:
+        status = f"model_load_failed: {load_error}"
+        status_code = 503
+    else:
+        status = "model_load_failed" if warmup_failed else "starting"
+        status_code = 503
+
+    payload = {
+        "status": status,
+        "model_loaded": model_loaded,
+        "warmup_completed": warmup_completed,
+        "warmup_failed": warmup_failed,
+        "available_voices_count": len(engine.get_available_voices()),
+        "provider": provider_info.get("active"),
+        "uptime_seconds": round(time.monotonic() - app_start_time, 3),
+        "model_repo_id": model_repo_id,
+        "device": model_info.get("device"),
+    }
+    return JSONResponse(content=payload, status_code=status_code)
+
+
 # --- Main UI Route ---
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def get_web_ui(request: Request):
+async def get_web_ui(request: Request, _: None = Depends(verify_ui_access)):
     """Serves the main web interface (index.html)."""
     logger.info("Request received for main UI page ('/').")
     try:
@@ -285,9 +406,21 @@ async def get_model_status_endpoint():
     return engine.get_download_status()
 
 
+@app.get("/health", tags=["Health"])
+@app.get("/api/tts/health", tags=["Health"])
+async def health_endpoint():
+    """Returns service, model, and warmup health state."""
+    return {
+        "status": "ok" if engine.MODEL_LOADED else "degraded",
+        "model_loaded": engine.MODEL_LOADED,
+        "model": engine.get_model_info(),
+        "warmup": engine.get_warmup_info(),
+    }
+
+
 # --- API Endpoint for Initial UI Data ---
 @app.get("/api/ui/initial-data", tags=["UI Helpers"])
-async def get_ui_initial_data():
+async def get_ui_initial_data(_: None = Depends(verify_ui_access), __: None = Depends(verify_api_key)):
     """
     Provides all necessary initial data for the UI to render,
     including configuration, file lists, presets, and model information.
@@ -323,8 +456,14 @@ async def get_ui_initial_data():
             "submittedVoice": None,
         }
 
+        sanitized_config = {
+            "ui": full_config.get("ui", {}),
+            "ui_state": full_config.get("ui_state", {}),
+            "generation_defaults": full_config.get("generation_defaults", {}),
+            "audio_output": full_config.get("audio_output", {}),
+        }
         return {
-            "config": full_config,
+            "config": sanitized_config,
             "presets": loaded_presets,
             "initial_gen_result": initial_gen_result_placeholder,
             "model_info": model_info,
@@ -340,7 +479,7 @@ async def get_ui_initial_data():
 
 # --- Configuration Management API Endpoints ---
 @app.post("/save_settings", response_model=UpdateStatusResponse, tags=["Configuration"])
-async def save_settings_endpoint(request: Request):
+async def save_settings_endpoint(request: Request, _: None = Depends(verify_management_access)):
     """
     Saves partial configuration updates to the config.yaml file.
     Merges the update with the current configuration.
@@ -383,7 +522,7 @@ async def save_settings_endpoint(request: Request):
 @app.post(
     "/reset_settings", response_model=UpdateStatusResponse, tags=["Configuration"]
 )
-async def reset_settings_endpoint():
+async def reset_settings_endpoint(_: None = Depends(verify_management_access)):
     """Resets the configuration in config.yaml back to hardcoded defaults."""
     logger.warning("Request received to reset all configurations to default values.")
     try:
@@ -409,7 +548,7 @@ async def reset_settings_endpoint():
 @app.post(
     "/restart_server", response_model=UpdateStatusResponse, tags=["Configuration"]
 )
-async def restart_server_endpoint():
+async def restart_server_endpoint(_: None = Depends(verify_management_access)):
     """
     Triggers an async hot-swap of the TTS model engine.
     Returns immediately while the model downloads and loads in the background.
@@ -432,7 +571,7 @@ async def restart_server_endpoint():
 
 
 @app.post("/api/cancel-loading", tags=["Configuration"])
-async def cancel_loading_endpoint():
+async def cancel_loading_endpoint(_: None = Depends(verify_management_access)):
     """Cancels any in-progress model loading."""
     logger.info("Request received for /api/cancel-loading.")
     cancelled = engine.cancel_loading()
@@ -442,7 +581,7 @@ async def cancel_loading_endpoint():
 
 
 @app.post("/api/unload", tags=["Configuration"])
-async def unload_model_endpoint():
+async def unload_model_endpoint(_: None = Depends(verify_management_access)):
     """
     Unloads the TTS model and releases all resources.
     The model will need to be reloaded (via /restart_server) before TTS requests can be processed.
@@ -462,6 +601,7 @@ async def unload_model_endpoint():
 # --- TTS Generation Endpoint ---
 
 
+@app.post("/api/tts/speak", tags=["TTS Generation"])
 @app.post(
     "/tts",
     tags=["TTS Generation"],
@@ -486,7 +626,7 @@ async def unload_model_endpoint():
     },
 )
 async def custom_tts_endpoint(
-    request: CustomTTSRequest, background_tasks: BackgroundTasks
+    request: CustomTTSRequest, background_tasks: BackgroundTasks, _: None = Depends(verify_api_key)
 ):
     """
     Generates speech audio from text using specified parameters.
@@ -497,6 +637,15 @@ async def custom_tts_endpoint(
     )
     perf_monitor.record("TTS request received")
 
+    output_format_str = (
+        request.output_format if request.output_format else get_audio_output_format()
+    )
+    if output_format_str == "mp3":
+        raise HTTPException(status_code=400, detail="MP3 output is not supported in this deployment. Use wav.")
+    if output_format_str not in ["wav", "opus"]:
+        raise HTTPException(status_code=400, detail=f"Invalid format: {output_format_str}. Only 'wav' or 'opus' are supported.")
+
+
     if not engine.MODEL_LOADED:
         logger.error("TTS request failed: Model not loaded.")
         raise HTTPException(
@@ -505,7 +654,7 @@ async def custom_tts_endpoint(
         )
 
     logger.info(
-        f"Received /tts request: voice='{request.voice}', format='{request.output_format}'"
+        f"Received /tts request: voice='{request.voice}', format='{request.output_format}', stream={request.stream}"
     )
     logger.debug(
         f"TTS params: speed={request.speed}, split={request.split_text}, chunk_size={request.chunk_size}"
@@ -514,9 +663,12 @@ async def custom_tts_endpoint(
 
     perf_monitor.record("Parameters resolved")
 
-    all_audio_segments_np: List[np.ndarray] = []
     final_output_sample_rate = get_audio_sample_rate()
-    engine_output_sample_rate: Optional[int] = None
+
+    output_format_str = (
+        request.output_format if request.output_format else get_audio_output_format()
+    )
+
 
     if request.split_text and len(request.text) > (
         request.chunk_size * 1.5 if request.chunk_size else 120 * 1.5
@@ -537,6 +689,90 @@ async def custom_tts_endpoint(
         raise HTTPException(
             status_code=400, detail="Text processing resulted in no usable chunks."
         )
+
+    if request.stream:
+        media_type = f"audio/{output_format_str}"
+
+        def stream_encoded_chunks() -> Iterator[bytes]:
+            engine_output_sample_rate: Optional[int] = None
+            chunks_yielded = 0
+
+            for i, chunk in enumerate(text_chunks):
+                logger.info(f"Streaming synthesis for chunk {i+1}/{len(text_chunks)}...")
+                try:
+                    chunk_audio_np, chunk_sr_from_engine = engine.synthesize(
+                        text=chunk,
+                        voice=request.voice,
+                        speed=(
+                            request.speed
+                            if request.speed is not None
+                            else get_gen_default_speed()
+                        ),
+                    )
+                    perf_monitor.record(f"Engine synthesized streaming chunk {i+1}")
+
+                    if chunk_audio_np is None or chunk_sr_from_engine is None:
+                        raise RuntimeError(
+                            f"TTS engine failed to synthesize audio for chunk {i+1}."
+                        )
+
+                    if engine_output_sample_rate is None:
+                        engine_output_sample_rate = chunk_sr_from_engine
+                    elif engine_output_sample_rate != chunk_sr_from_engine:
+                        logger.warning(
+                            f"Inconsistent sample rate from engine: chunk {i+1} ({chunk_sr_from_engine}Hz) "
+                            f"differs from previous ({engine_output_sample_rate}Hz). Encoding chunk with its own SR."
+                        )
+
+                    encoded_chunk = utils.encode_audio(
+                        audio_array=chunk_audio_np,
+                        sample_rate=chunk_sr_from_engine,
+                        output_format=output_format_str,
+                        target_sample_rate=final_output_sample_rate,
+                    )
+                    perf_monitor.record(
+                        f"Streaming chunk {i+1} encoded to {output_format_str} "
+                        f"(target SR: {final_output_sample_rate}Hz from engine SR: {chunk_sr_from_engine}Hz)"
+                    )
+
+                    if encoded_chunk is None or len(encoded_chunk) < 100:
+                        raise RuntimeError(
+                            f"Failed to encode audio chunk {i+1} to {output_format_str} "
+                            f"or generated invalid audio."
+                        )
+
+                    if output_format_str == "wav" and chunks_yielded > 0:
+                        encoded_chunk = encoded_chunk[44:]
+                    chunks_yielded += 1
+                    yield encoded_chunk
+                except Exception as e_chunk:
+                    logger.error(
+                        f"Error processing streaming audio chunk {i+1}: {e_chunk}",
+                        exc_info=True,
+                    )
+                    raise
+
+            if chunks_yielded == 0:
+                logger.error("Streaming audio generation yielded no chunks.")
+                raise RuntimeError("Audio generation resulted in no output.")
+
+            logger.info(
+                f"Successfully streamed {chunks_yielded} encoded audio chunks as {media_type}."
+            )
+            logger.debug(perf_monitor.report())
+
+        headers = {"X-TTS-Stream-Mode": "chunked-encoded-audio"}
+        if output_format_str == "wav":
+            headers["X-TTS-WAV-Streaming-Note"] = (
+                "Each chunk is a standalone WAV with its own header; clients requiring one WAV file may be incompatible."
+            )
+
+        return StreamingResponse(
+            stream_encoded_chunks(), media_type=media_type, headers=headers
+        )
+
+    all_audio_segments_np: List[np.ndarray] = []
+    engine_output_sample_rate: Optional[int] = None
 
     for i, chunk in enumerate(text_chunks):
         logger.info(f"Synthesizing chunk {i+1}/{len(text_chunks)}...")
@@ -642,10 +878,6 @@ async def custom_tts_endpoint(
             status_code=500, detail=f"Audio concatenation error: {e_concat}"
         )
 
-    output_format_str = (
-        request.output_format if request.output_format else get_audio_output_format()
-    )
-
     encoded_audio_bytes = utils.encode_audio(
         audio_array=final_audio_np,
         sample_rate=engine_output_sample_rate,
@@ -684,7 +916,7 @@ async def custom_tts_endpoint(
 
 
 @app.post("/v1/audio/speech", tags=["OpenAI Compatible"])
-async def openai_speech_endpoint(request: OpenAISpeechRequest):
+async def openai_speech_endpoint(request: OpenAISpeechRequest, _: None = Depends(verify_api_key)):
     # Check if the TTS model is loaded
     if not engine.MODEL_LOADED:
         raise HTTPException(
@@ -692,40 +924,115 @@ async def openai_speech_endpoint(request: OpenAISpeechRequest):
             detail="TTS engine model is not currently loaded or available.",
         )
 
-    try:
-        # Synthesize the audio
+    if request.response_format == "mp3":
+        raise HTTPException(status_code=400, detail="MP3 output is not supported in this deployment. Use wav.")
+    request_start = time.perf_counter()
+    text_length = len(request.input_ or "")
+    chunk_size = 300
+    should_stream_chunks = text_length > chunk_size and request.response_format == "wav"
+    media_type = f"audio/{request.response_format}"
+
+    def log_timing(event_name: str, start_time: float = request_start) -> None:
+        elapsed = time.perf_counter() - start_time
+        total_elapsed = time.perf_counter() - request_start
+        logger.info(
+            "OpenAI speech timing: %s took %.3fs (total %.3fs)",
+            event_name,
+            elapsed,
+            total_elapsed,
+        )
+
+    def synthesize_and_encode_chunk(chunk_text: str, chunk_index: int) -> bytes:
+        chunk_start = time.perf_counter()
         audio_np, sr = engine.synthesize(
-            text=request.input_,
+            text=chunk_text,
             voice=request.voice,
             speed=request.speed,
         )
+        log_timing(f"chunk {chunk_index} synthesis", chunk_start)
 
         if audio_np is None or sr is None:
             raise HTTPException(
-                status_code=500, detail="TTS engine failed to synthesize audio."
+                status_code=500,
+                detail=f"TTS engine failed to synthesize audio for chunk {chunk_index}.",
             )
 
         # Ensure it's 1D
         if audio_np.ndim == 2:
             audio_np = audio_np.squeeze()
 
-        # Encode the audio to the requested format
+        encode_start = time.perf_counter()
         encoded_audio = utils.encode_audio(
             audio_array=audio_np,
             sample_rate=sr,
             output_format=request.response_format,
             target_sample_rate=get_audio_sample_rate(),
         )
+        log_timing(
+            f"chunk {chunk_index} {request.response_format} encoding", encode_start
+        )
 
         if encoded_audio is None:
-            raise HTTPException(status_code=500, detail="Failed to encode audio.")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to encode audio for chunk {chunk_index}.",
+            )
 
-        # Determine the media type
-        media_type = f"audio/{request.response_format}"
+        return encoded_audio
 
-        # Return the streaming response
-        return StreamingResponse(io.BytesIO(encoded_audio), media_type=media_type)
+    try:
+        if not should_stream_chunks:
+            if text_length > chunk_size and request.response_format != "wav":
+                logger.info(
+                    "OpenAI speech request uses response_format='%s'; using buffered compatibility path. "
+                    "Chunked low-latency streaming is currently enabled for WAV responses only.",
+                    request.response_format,
+                )
+            encoded_audio = synthesize_and_encode_chunk(request.input_, 1)
+            log_timing("buffered response ready")
+            return StreamingResponse(io.BytesIO(encoded_audio), media_type=media_type)
 
+        logger.info(
+            "OpenAI speech request length %d exceeds %d characters; streaming WAV sentence chunks.",
+            text_length,
+            chunk_size,
+        )
+
+        def audio_chunk_generator():
+            first_chunk_logged = False
+            first_yield_logged = False
+
+            try:
+                for chunk_index, text_chunk in enumerate(
+                    utils.chunk_text_by_sentences(request.input_, chunk_size), start=1
+                ):
+                    if not text_chunk.strip():
+                        continue
+
+                    chunk_start = time.perf_counter()
+                    encoded_audio = synthesize_and_encode_chunk(text_chunk, chunk_index)
+                    if not first_chunk_logged:
+                        log_timing("first chunk generated", chunk_start)
+                        first_chunk_logged = True
+
+                    if not first_yield_logged:
+                        log_timing("first chunk yielded")
+                        first_yield_logged = True
+                    if request.response_format == "wav" and chunk_index > 1:
+                        encoded_audio = encoded_audio[44:]
+                    yield encoded_audio
+
+                log_timing("streaming response completed")
+            except Exception as e:
+                logger.error(
+                    f"Error while streaming openai_speech_endpoint: {e}", exc_info=True
+                )
+                raise
+
+        return StreamingResponse(audio_chunk_generator(), media_type=media_type)
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in openai_speech_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
