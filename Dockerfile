@@ -15,6 +15,7 @@ ENV HF_HOME=/app/hf_cache
 # Install system dependencies required for the application
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    python3-dev \
     libsndfile1 \
     ffmpeg \
     git \
