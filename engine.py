@@ -340,14 +340,24 @@ def _init_espeak():
             logger.warning("eSpeak NG not found in common Windows locations.")
 
     elif os.name == "posix":  # Linux/macOS
-        logger.info("Checking for system-installed eSpeak NG on Linux...")
-        espeak_lib_path = "/usr/lib/x86_64-linux-gnu/libespeak-ng.so"
-        if Path(espeak_lib_path).exists():
-            os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = espeak_lib_path
-            logger.info(f"Found and configured system eSpeak NG library: {espeak_lib_path}")
-        else:
+        logger.info("Checking for system-installed eSpeak NG on Linux/Mac...")
+        possible_paths = [
+            Path("/usr/lib/x86_64-linux-gnu/libespeak-ng.so"),
+            Path("/opt/homebrew/lib/libespeak-ng.dylib"),
+        ]
+        espeak_found = False
+        for espeak_lib_path in possible_paths:
+            if not espeak_lib_path.exists():
+                continue
+            os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = str(espeak_lib_path)
+            logger.info(
+                f"Found and configured system eSpeak NG library: {espeak_lib_path}"
+            )
+            espeak_found = True
+            break
+        if not espeak_found:
             logger.warning(
-                f"Could not find system eSpeak NG library at {espeak_lib_path}. "
+                f"Could not find system eSpeak NG library at {possible_paths}. "
                 "Please ensure 'espeak-ng' is installed via your package manager."
             )
 
