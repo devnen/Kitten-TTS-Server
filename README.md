@@ -489,6 +489,23 @@ Use this for drop-in compatibility with scripts expecting OpenAI's TTS API struc
 *   `POST /restart_server` — Triggers an async model hot-swap based on current config.
 *   `POST /api/cancel-loading` — Cancels an in-progress model download/load.
 
+### Wyoming Protocol (Home Assistant)
+
+The server can also speak the [Wyoming protocol](https://github.com/OHF-Voice/wyoming), so Home Assistant can use KittenTTS as a text-to-speech provider. It is disabled by default because the protocol has no authentication. Enable it in `config.yaml`:
+
+```yaml
+wyoming:
+  enabled: true
+  host: 0.0.0.0
+  port: 10200
+  zeroconf: true          # advertise over mDNS so Home Assistant discovers it
+  zeroconf_name: kitten-tts
+```
+
+With zeroconf on, Home Assistant offers the server under **Settings > Devices & services** automatically; otherwise add the **Wyoming Protocol** integration manually with this machine's address and port `10200`. The voices of the active model are advertised automatically. The provided Docker Compose files already publish port `10200` (override with `WYOMING_PORT`).
+
+**Docker and zeroconf:** mDNS does not cross Docker's default bridge network, so auto-discovery only works with host networking (Linux only): remove `ports:` and set `network_mode: host` in the compose file. On Docker Desktop (macOS/Windows), or if you keep the bridge network, set `zeroconf: false` and add the server manually by IP and port.
+
 ## ⚙️ Configuration
 
 All server settings are managed in the `config.yaml` file. It's created automatically on first launch if it doesn't exist.

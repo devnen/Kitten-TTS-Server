@@ -858,13 +858,17 @@ document.addEventListener('DOMContentLoaded', async function () {
             "server.host": currentConfig.server?.host, "server.port": currentConfig.server?.port,
             "tts_engine.device": currentConfig.tts_engine?.device, "model.repo_id": currentConfig.model?.repo_id,
             "paths.model_cache": currentConfig.paths?.model_cache, "paths.output": currentConfig.paths?.output,
-            "audio_output.format": currentConfig.audio_output?.format, "audio_output.sample_rate": currentConfig.audio_output?.sample_rate
+            "audio_output.format": currentConfig.audio_output?.format, "audio_output.sample_rate": currentConfig.audio_output?.sample_rate,
+            "wyoming.enabled": currentConfig.wyoming?.enabled, "wyoming.port": currentConfig.wyoming?.port,
+            "wyoming.zeroconf": currentConfig.wyoming?.zeroconf
         };
         for (const name in fieldsToDisplay) {
             const input = serverConfigForm.querySelector(`input[name="${name}"]`);
             if (input) {
-                input.value = fieldsToDisplay[name] !== undefined ? fieldsToDisplay[name] : '';
-                if (name.includes('.host') || name.includes('.port') || name.includes('.device') || name.includes('paths.')) input.readOnly = true;
+                if (input.type === 'checkbox') input.checked = !!fieldsToDisplay[name];
+                else input.value = fieldsToDisplay[name] !== undefined ? fieldsToDisplay[name] : '';
+                // Wyoming settings are applied live on save, so they stay editable.
+                if (!name.startsWith('wyoming.') && (name.includes('.host') || name.includes('.port') || name.includes('.device') || name.includes('paths.'))) input.readOnly = true;
                 else input.readOnly = false;
             }
         }

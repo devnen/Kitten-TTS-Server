@@ -4,6 +4,9 @@
 fastapi
 uvicorn[standard]
 
+# Wyoming protocol (Home Assistant) support
+wyoming[zeroconf]
+
 # KittenTTS Core Dependencies
 onnxruntime
 soundfile

@@ -64,6 +64,7 @@ RUN mkdir -p model_cache outputs logs hf_cache
 
 # Expose the port the application will run on (aligned with docker-compose.yml)
 EXPOSE 8005
+EXPOSE 10200
 
 # The command to run when the container starts
 CMD ["python", "server.py"]

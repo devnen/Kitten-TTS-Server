@@ -10,6 +10,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "${PORT:-8005}:8005"
+      - "${WYOMING_PORT:-10200}:10200"  # Wyoming protocol (only used if enabled in config.yaml)
+    # Wyoming zeroconf auto-discovery needs host networking (Linux only). If you use it,
+    # remove the 'ports:' section above and uncomment:
+    # network_mode: host
     volumes:
       # Mount local config file for persistence
       - ./config.yaml:/app/config.yaml
