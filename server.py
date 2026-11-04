@@ -123,6 +123,40 @@ def _delayed_browser_open(host: str, port: int):
         logger.error(f"Failed to open browser automatically: {e}", exc_info=True)
 
 
+wyoming_listener = None
+
+
+async def apply_wyoming_config() -> Optional[str]:
+    """(Re)starts or stops the Wyoming listener from config. Returns an error message on failure."""
+    global wyoming_listener
+    if wyoming_listener is not None:
+        await wyoming_listener.stop()
+        wyoming_listener = None
+
+    if not config_manager.get_bool("wyoming.enabled", False):
+        return None
+
+    try:
+        from wyoming_server import start_wyoming_server
+
+        wyoming_listener = await start_wyoming_server(
+            config_manager.get_string("wyoming.host", "0.0.0.0"),
+            config_manager.get_int("wyoming.port", 10200),
+            (
+                config_manager.get_string("wyoming.zeroconf_name", "kitten-tts")
+                if config_manager.get_bool("wyoming.zeroconf", True)
+                else None
+            ),
+        )
+    except Exception as e_wyoming:
+        logger.error(
+            f"Wyoming server failed to start (HTTP API unaffected): {e_wyoming}",
+            exc_info=True,
+        )
+        return f"Wyoming server failed to start: {e_wyoming}"
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manages application startup and shutdown events."""
@@ -154,6 +188,8 @@ async def lifespan(app: FastAPI):
             )
             browser_thread.start()
 
+        await apply_wyoming_config()
+
         logger.info("Application startup sequence complete.")
         startup_complete_event.set()
         yield
@@ -165,6 +201,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("TTS Server: Application shutdown sequence initiated...")
+        if wyoming_listener is not None:
+            await wyoming_listener.stop()
         logger.info("TTS Server: Application shutdown complete.")
 
 
@@ -360,6 +398,9 @@ async def save_settings_endpoint(request: Request):
             message = "Settings saved successfully."
             if restart_needed:
                 message += " A server restart may be required for some changes to take full effect."
+            if "wyoming" in partial_update:
+                wyoming_error = await apply_wyoming_config()
+                message += f" {wyoming_error}" if wyoming_error else " Wyoming settings applied."
             return UpdateStatusResponse(message=message, restart_needed=restart_needed)
         else:
             logger.error(

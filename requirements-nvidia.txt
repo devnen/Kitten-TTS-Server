@@ -13,6 +13,9 @@ espeakng_loader==0.2.0
 fastapi
 uvicorn[standard]
 
+# Wyoming protocol (Home Assistant) support
+wyoming[zeroconf]
+
 # Configuration & Utilities
 PyYAML
 python-multipart

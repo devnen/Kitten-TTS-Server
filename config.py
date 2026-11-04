@@ -44,6 +44,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "log_file_max_size_mb": 10,  # Maximum size of a single log file before rotation.
         "log_file_backup_count": 5,  # Number of backup log files to keep.
     },
+    "wyoming": {  # Wyoming protocol TTS server (e.g. for Home Assistant).
+        "enabled": False,  # Opt-in: the Wyoming protocol has no authentication.
+        "host": "0.0.0.0",  # Host address for the Wyoming TCP listener.
+        "port": 10200,  # Port for the Wyoming TCP listener.
+        "zeroconf": True,  # Advertise over mDNS so Home Assistant discovers the server.
+        "zeroconf_name": "kitten-tts",  # mDNS instance name; must be unique on the network.
+    },
     "model": {  # Updated section for model source configuration
         "repo_id": "KittenML/kitten-tts-nano-0.1",  # KittenTTS Hugging Face repository ID
     },
